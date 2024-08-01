@@ -315,43 +315,46 @@ def train_dino(args):
         if args.saveckp_freq and epoch % args.saveckp_freq == 0:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
 
+        log_stats = {**{f'train_dino/{k}': v for k, v in train_stats.items()}, 'epoch': epoch}
+
         if utils.is_main_process():
-            log_stats = {**{f'train_dino/{k}': v for k, v in train_stats.items()}, 'epoch': epoch}
-
-            if epoch % args.saveckp_freq == 0:
-                device = torch.device("cuda")
-                monitoring_dict = dict()
-
-                effrank = utils.calculate_effrank(data_loader_val, teacher_bkb, device)
-
-                monitoring_dict["effrank"] = effrank
-
-                cls_cls_attn_stats, pos_self_attn_stats = utils.calculate_attention_stats(data_loader_val, teacher_bkb, device)
-
-                for b, cca in enumerate(cls_cls_attn_stats):
-                    monitoring_dict[f"cls_cls_attn_per_block/{b}"] = cca
-                for b, psa in enumerate(pos_self_attn_stats):
-                    monitoring_dict[f"pos_self_attn_per_block/{b}"] = psa
-
-                if wandb.run is not None:
-                    f1, ax1 = plt.subplots(1,1)
-                    ax1.set_title(f"Cls_cls_attn @ {epoch}")
-                    ax1.plot(list(range(len(cls_cls_attn_stats))), cls_cls_attn_stats)
-                    ax1.set_ylim(0, 1.2)
-
-                    monitoring_dict["cls_cls_attn_plot"] = f1
-
-                    f2, ax2 = plt.subplots(1, 1)
-                    ax2.set_title(f"Pos_self_attn @ {epoch}")
-                    ax2.plot(list(range(len(pos_self_attn_stats))), pos_self_attn_stats)
-                    ax2.set_ylim(0, 1.2)
-                    monitoring_dict["pos_self_attn_plot"] = f2
-
-                    log_stats.update({f"monitoring/{k}": v for (k,v) in monitoring_dict.items()})
-                    wandb.log(log_stats)
-
             with (Path(args.output_dir) / "log.txt").open("a") as f1:
                 f1.write(json.dumps(log_stats) + "\n")
+
+        if epoch % args.saveckp_freq == 0:
+            device = torch.device("cuda")
+            monitoring_dict = dict()
+
+            effrank = utils.calculate_effrank(data_loader_val, teacher_bkb, device)
+
+            monitoring_dict["effrank"] = effrank
+
+            cls_cls_attn_stats, pos_self_attn_stats = utils.calculate_attention_stats(data_loader_val, teacher_bkb, device)
+
+            for b, cca in enumerate(cls_cls_attn_stats):
+                monitoring_dict[f"cls_cls_attn_per_block/{b}"] = cca
+            for b, psa in enumerate(pos_self_attn_stats):
+                monitoring_dict[f"pos_self_attn_per_block/{b}"] = psa
+
+            f1, ax1 = plt.subplots(1,1)
+            ax1.set_title(f"Cls_cls_attn @ {epoch}")
+            ax1.plot(list(range(len(cls_cls_attn_stats))), cls_cls_attn_stats)
+            ax1.set_ylim(0, 1.2)
+
+            monitoring_dict["cls_cls_attn_plot"] = f1
+
+            f2, ax2 = plt.subplots(1, 1)
+            ax2.set_title(f"Pos_self_attn @ {epoch}")
+            ax2.plot(list(range(len(pos_self_attn_stats))), pos_self_attn_stats)
+            ax2.set_ylim(0, 1.2)
+            monitoring_dict["pos_self_attn_plot"] = f2
+
+            log_stats.update({f"monitoring/{k}": v for (k,v) in monitoring_dict.items()})
+
+        if wandb.run is not None:
+            wandb.log(log_stats)
+
+
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
