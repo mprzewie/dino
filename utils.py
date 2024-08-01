@@ -25,12 +25,15 @@ import random
 import datetime
 import subprocess
 from collections import defaultdict, deque
+from pathlib import Path
 
 import numpy as np
 import torch
+import wandb
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
+from tqdm import tqdm
 
 
 class GaussianBlur(object):
@@ -827,3 +830,82 @@ def multi_scale(samples, model):
     v /= 3
     v /= v.norm()
     return v
+
+@torch.no_grad()
+def calculate_effrank(data_loader, model: "VisionTransformer", device):
+    Xs = []
+    for i, (val_img, _) in enumerate(tqdm(data_loader, desc="effrank")):
+        val_img = val_img.to(device)
+        cls_features, _ = model.forward(val_img)
+
+        Xs.append(cls_features.detach().cpu().numpy())
+
+
+    Xs = np.concatenate(Xs, axis=0)
+    U, D, V = np.linalg.svd(Xs)
+    D_l1 = np.abs(D).sum()
+    P = D / D_l1
+    H = P * np.log(P)
+    effrank = np.exp(-H.sum())
+    return effrank
+
+@torch.no_grad()
+def calculate_attention_stats(data_loader,  model: "VisionTransformer", device):
+    cls_cls_attns = []
+    pos_self_attns = []
+    for i, (data, target) in enumerate(tqdm(data_loader, desc="attention stats")):
+        latent, attns = model.forward(data.to(device))
+
+        cls_cls_attn = attns[:, :, :, 0].detach().cpu() # batch, blocks, heads
+        cls_cls_attns.append(cls_cls_attn)
+
+        pos_self_attn = attns[:, :, :, 1].detach().cpu()
+        pos_self_attns.append(pos_self_attn)
+
+    cls_cls_attns = torch.cat(cls_cls_attns, dim=0)
+    cls_cls_attns = cls_cls_attns.mean(dim=(0, 2))
+
+    pos_self_attns = torch.cat(pos_self_attns, dim=0)
+    pos_self_attns = pos_self_attns.mean(dim=(0, 2))
+
+    return cls_cls_attns, pos_self_attns
+
+def maybe_setup_wandb(logdir, args=None, run_name_suffix=None, **init_kwargs):
+
+    wandb_entity = os.environ.get("WANDB_ENTITY")
+    wandb_project = os.environ.get("WANDB_PROJECT")
+
+    if wandb_entity is None or wandb_project is None:
+        print(f"{wandb_entity=}", f"{wandb_project=}")
+        print("Not initializing WANDB")
+        return
+
+    origin_run_name = Path(logdir).name
+
+    api = wandb.Api()
+
+    name_runs = list(api.runs(f'{wandb_entity}/{wandb_project}', filters={'display_name': origin_run_name}))
+    group_runs = list(api.runs(f'{wandb_entity}/{wandb_project}', filters={'group': origin_run_name}))
+
+    print(f'Retrieved {len(name_runs)} for run_name: {origin_run_name}')
+
+    assert len(name_runs) <= 1, f'retrieved_runs: {len(name_runs)}'
+
+    new_run_name = origin_run_name if len(name_runs) == 0 else f"{origin_run_name}_{len(group_runs)}"
+
+    if run_name_suffix is not None:
+        new_run_name = f"{new_run_name}_{run_name_suffix}"
+
+    wandb.init(
+        entity=wandb_entity,
+        project=wandb_project,
+        config=args,
+        name=new_run_name,
+        dir=logdir,
+        resume="never",
+        group=origin_run_name,
+        sync_tensorboard=True,
+        **init_kwargs
+    )
+
+    print("WANDB run", wandb.run.id, new_run_name, origin_run_name)

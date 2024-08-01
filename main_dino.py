@@ -21,12 +21,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+import wandb
 from PIL import Image
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
 
@@ -117,7 +119,7 @@ def get_args_parser():
         Used for small local view cropping of multi-crop.""")
 
     # Misc
-    parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
+    parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=Path,
         help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
@@ -142,7 +144,7 @@ def train_dino(args):
         args.local_crops_scale,
         args.local_crops_number,
     )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    dataset = datasets.ImageFolder(args.data_path / "train", transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -153,6 +155,22 @@ def train_dino(args):
         drop_last=True,
     )
     print(f"Data loaded: there are {len(dataset)} images.")
+
+    transform_val = transforms.Compose([
+        transforms.Resize(int(256), interpolation=3),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    dataset_val = datasets.ImageFolder(args.data_path / "train", transform=transform_val)
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, shuffle=False,
+        batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False
+    )
 
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
@@ -180,6 +198,8 @@ def train_dino(args):
         print(f"Unknow architecture: {args.arch}")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
+    student_bkb = student
+    teacher_bkb = teacher
     student = utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
         args.out_dim,
@@ -276,8 +296,10 @@ def train_dino(args):
 
         # ============ writing logs ... ============
         save_dict = {
-            'student': student.state_dict(),
-            'teacher': teacher.state_dict(),
+            "student_bkb": student_bkb.state_dict(),
+            "teacher_bkb": teacher_bkb.state_dict(),
+            # 'student': student.state_dict(),
+            # 'teacher': teacher.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
             'args': args,
@@ -288,11 +310,45 @@ def train_dino(args):
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
         if args.saveckp_freq and epoch % args.saveckp_freq == 0:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     'epoch': epoch}
+
         if utils.is_main_process():
-            with (Path(args.output_dir) / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            log_stats = {**{f'train_dino/{k}': v for k, v in train_stats.items()}, 'epoch': epoch}
+
+            if epoch % args.saveckp_freq == 0:
+                device = torch.device("cuda")
+                monitoring_dict = dict()
+
+                effrank = utils.calculate_effrank(data_loader_val, teacher_bkb, device)
+
+                monitoring_dict["effrank"] = effrank
+
+                cls_cls_attn_stats, pos_self_attn_stats = utils.calculate_attention_stats(data_loader_val, teacher_bkb, device)
+
+                for b, cca in enumerate(cls_cls_attn_stats):
+                    monitoring_dict[f"cls_cls_attn_per_block/{b}"] = cca
+                for b, psa in enumerate(pos_self_attn_stats):
+                    monitoring_dict[f"pos_self_attn_per_block/{b}"] = psa
+
+                if wandb.run is not None:
+                    f1, ax1 = plt.subplots(1,1)
+                    ax1.set_title(f"Cls_cls_attn @ {epoch}")
+                    ax1.plot(list(range(len(cls_cls_attn_stats))), cls_cls_attn_stats)
+                    ax1.set_ylim(0, 1.2)
+
+                    monitoring_dict["cls_cls_attn_plot"] = f1
+
+                    f2, ax2 = plt.subplots(1, 1)
+                    ax2.set_title(f"Pos_self_attn @ {epoch}")
+                    ax2.plot(list(range(len(pos_self_attn_stats))), pos_self_attn_stats)
+                    ax2.set_ylim(0, 1.2)
+                    monitoring_dict["pos_self_attn_plot"] = f2
+
+                    log_stats.update({f"monitoring/{k}": v for (k,v) in monitoring_dict.items()})
+                    wandb.log(log_stats)
+
+            with (Path(args.output_dir) / "log.txt").open("a") as f1:
+                f1.write(json.dumps(log_stats) + "\n")
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
@@ -468,4 +524,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    utils.maybe_setup_wandb(logdir=args.output_dir, args=args, job_type="dino_pretrain")
     train_dino(args)

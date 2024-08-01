@@ -106,11 +106,9 @@ class Block(nn.Module):
 
     def forward(self, x, return_attention=False):
         y, attn = self.attn(self.norm1(x))
-        if return_attention:
-            return attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        return x, attn
 
 
 class PatchEmbed(nn.Module):
@@ -207,11 +205,25 @@ class VisionTransformer(nn.Module):
         return self.pos_drop(x)
 
     def forward(self, x):
+        attentions = []
         x = self.prepare_tokens(x)
         for blk in self.blocks:
-            x = blk(x)
+            x, attn = blk.forward(x)
+            cls_cls_attn = attn[:, :, 0, 0].unsqueeze(2)
+            B, H, T, T = attn.shape
+            r = torch.arange(1, T).to(attn.device)
+            # assert False, r
+            self_non_cls_attn = attn[:, :, r, r].mean(dim=2, keepdim=True)
+            # assert False, [t.shape for t in [x, attn, cls_cls_attn, self_non_cls_attn]]
+            attn_stats = torch.cat((cls_cls_attn, self_non_cls_attn), dim=2).unsqueeze(1)
+            # assert False, attn_stats.shape
+            attentions.append(attn_stats.detach().cpu())
+
         x = self.norm(x)
-        return x[:, 0]
+
+        attentions = torch.cat(attentions, dim=1)
+
+        return x[:, 0], attentions
 
     def get_last_selfattention(self, x):
         x = self.prepare_tokens(x)
@@ -227,7 +239,7 @@ class VisionTransformer(nn.Module):
         # we return the output tokens from the `n` last blocks
         output = []
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
+            x, attn = blk(x)
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
