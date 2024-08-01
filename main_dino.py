@@ -138,6 +138,10 @@ def train_dino(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
+    if utils.is_main_process():
+        utils.maybe_setup_wandb(logdir=args.output_dir, args=args, job_type="dino_pretrain")
+
+
     # ============ preparing data ... ============
     transform = DataAugmentationDINO(
         args.global_crops_scale,
@@ -524,5 +528,4 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    utils.maybe_setup_wandb(logdir=args.output_dir, args=args, job_type="dino_pretrain")
     train_dino(args)
