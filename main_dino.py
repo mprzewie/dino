@@ -167,7 +167,7 @@ def train_dino(args):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset_val = datasets.ImageFolder(args.data_path / "train", transform=transform_val)
+    dataset_val = datasets.ImageFolder(args.data_path / "val", transform=transform_val)
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, shuffle=False,
         batch_size=args.batch_size_per_gpu,
